@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../services/api';
 import {
   FolderLock,
@@ -14,7 +14,8 @@ import {
   Loader2,
   Edit2,
   Check,
-  X
+  X,
+  Camera
 } from 'lucide-react';
 
 const DOC_CATEGORIES = [
@@ -43,6 +44,7 @@ export default function VaultPage() {
   // Upload Form State
   const [uploadFile, setUploadFile] = useState(null);
   const [docType, setDocType] = useState('aadhaar');
+  const vaultCameraInputRef = useRef(null);
 
   // Review & Approval Modal State
   const [reviewModalDoc, setReviewModalDoc] = useState(null);
@@ -209,12 +211,30 @@ export default function VaultPage() {
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1.5">Select File (PDF, JPG, PNG)</label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-semibold text-slate-300">Select File or Photo</label>
+              <button
+                type="button"
+                onClick={() => vaultCameraInputRef.current?.click()}
+                className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center space-x-1 font-medium cursor-pointer"
+              >
+                <Camera className="w-3.5 h-3.5" />
+                <span>Camera Snap</span>
+              </button>
+            </div>
             <input
               type="file"
               accept=".pdf,.jpg,.jpeg,.png"
               onChange={(e) => setUploadFile(e.target.files[0])}
               className="w-full px-3 py-1.5 bg-[#0D1527] border border-[#1E2D4A] rounded-xl text-slate-300 text-xs file:mr-3 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[11px] file:font-semibold file:bg-violet-600 file:text-white hover:file:bg-violet-500 cursor-pointer"
+            />
+            <input
+              type="file"
+              accept="image/*"
+              capture="environment"
+              ref={vaultCameraInputRef}
+              onChange={(e) => setUploadFile(e.target.files[0])}
+              className="hidden"
             />
           </div>
 
