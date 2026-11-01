@@ -1,0 +1,14 @@
+{
+  "name": "formwise-ai",
+  "version": "1.0.0",
+  "description": "FormWise AI: Understand. Fill. Verify. Apply. — Single Unified Full-Stack Application",
+  "scripts": {
+    "start": "python run.py",
+    "serve": "python run.py",
+    "build:frontend": "cd frontend && npm run build",
+    "test:backend": "python tests/test_backend.py",
+    "test:e2e": "python tests/test_end_to_end_scenario.py"
+  },
+  "author": "FormWise AI Team",
+  "license": "MIT"
+}

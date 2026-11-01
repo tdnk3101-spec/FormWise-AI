@@ -11,14 +11,18 @@ __pycache__/
 env/
 build/
 develop-eggs/
-dist/
+backend/dist/
+!frontend/dist/
+!frontend/dist/**
 downloads/
 eggs/
 .eggs/
 lib/
 lib64/
 parts/
-sdist/
+sbackend/dist/
+!frontend/dist/
+!frontend/dist/**
 var/
 *.egg-info/
 .installed.cfg
@@ -43,7 +47,9 @@ backend/formwise.db
 
 # Node.js
 frontend/node_modules/
-frontend/dist/
+# frontend/backend/dist/
+!frontend/dist/
+!frontend/dist/** (tracked for turnkey unified server deployment)
 frontend/dist-ssr/
 *.local
 
