@@ -1,6 +1,8 @@
 import os
 import json
-from typing import Dict, Any, Optional
+import re
+import requests
+from typing import Dict, Any, Optional, List
 from app.core.config import settings
 
 class AIOrchestrator:
@@ -9,13 +11,93 @@ class AIOrchestrator:
         return bool(settings.LLM_API_KEY and len(settings.LLM_API_KEY.strip()) > 5)
 
     @staticmethod
+    def _call_groq(messages: List[Dict[str, str]], response_format: Optional[Dict[str, Any]] = None, max_tokens: int = 1000) -> Optional[str]:
+        """
+        Executes an inference request against Groq's high-speed LLM API.
+        """
+        if not settings.LLM_API_KEY:
+            return None
+
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {settings.LLM_API_KEY.strip()}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": settings.effective_llm_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": 0.2
+        }
+        if response_format:
+            payload["response_format"] = response_format
+
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=20)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data["choices"][0]["message"]["content"]
+            else:
+                print(f"[AIOrchestrator] Groq error HTTP {resp.status_code}: {resp.text}")
+                return None
+        except Exception as e:
+            print(f"[AIOrchestrator] Groq request failed: {e}")
+            return None
+
+    @staticmethod
     def explain_field(field_label: str, normalized_name: str, form_title: str, language: str = "en") -> Dict[str, Any]:
         """
         Generates contextual explanation, required format, examples, and supporting documents in EN, TE, or HI.
-        Uses Gemini if configured, otherwise high-precision bilingual knowledge engine.
+        Uses Groq if configured with gsk_ key, Gemini if configured with AIza key, or deterministic internal engine.
         """
-        # If Gemini API Key is provided, call Gemini
-        if AIOrchestrator.is_external_ai_configured() and settings.LLM_PROVIDER.lower() == "gemini":
+        provider = settings.effective_llm_provider
+
+        # 1. Groq LLM Provider
+        if AIOrchestrator.is_external_ai_configured() and provider == "groq":
+            try:
+                lang_instruction = "Respond in clear English."
+                if language == "te":
+                    lang_instruction = "Respond in fluent Telugu (తెలుగు లిపి)."
+                elif language == "hi":
+                    lang_instruction = "Respond in fluent Hindi (हिन्दी लिपि)."
+
+                prompt = f"""You are FormWise AI, an expert Indian application form guide and document specialist.
+Form Title: "{form_title}"
+Field Label: "{field_label}" (Normalized Key: {normalized_name})
+Target Language: {language}
+
+Provide a structured JSON object with exactly these four keys:
+- "meaning": A clear, simple 1-2 sentence explanation of what this field is asking for and why it matters.
+- "format_example": A realistic sample format (explicitly mark it as [Example]).
+- "supporting_doc": Official certificate or document required in India (or "None required" if self-declaration).
+- "warnings": Any critical pitfalls (e.g. spelling match with 10th marksheet, income certificate validity, masking Aadhaar).
+
+{lang_instruction}
+Return pure JSON with no markdown wrapping.
+"""
+                messages = [
+                    {"role": "system", "content": "You are FormWise AI, a helpful Indian citizen document intelligence assistant. Always output valid JSON."},
+                    {"role": "user", "content": prompt}
+                ]
+
+                groq_res = AIOrchestrator._call_groq(messages, response_format={"type": "json_object"}, max_tokens=600)
+                if groq_res:
+                    parsed = json.loads(groq_res.strip())
+                    return {
+                        "field_id": normalized_name,
+                        "label": field_label,
+                        "meaning": parsed.get("meaning", f"Enter details for {field_label}"),
+                        "format_example": parsed.get("format_example", "[Example] Valid input"),
+                        "supporting_doc": parsed.get("supporting_doc", "Relevant official document"),
+                        "warnings": parsed.get("warnings", "Ensure details match verified certificates."),
+                        "language": language
+                    }
+            except Exception as e:
+                print(f"[AIOrchestrator] Groq explain_field error: {e}. Falling back to internal engine.")
+
+        # 2. Google Gemini Provider
+        elif AIOrchestrator.is_external_ai_configured() and provider == "gemini":
             try:
                 from google import genai
                 client = genai.Client(api_key=settings.LLM_API_KEY)
@@ -36,7 +118,7 @@ Provide a structured JSON response with:
 1. "meaning": A clear 1-2 sentence explanation of what this field is asking for and why it matters.
 2. "format_example": A realistic sample format (explicitly mark it as [Example]).
 3. "supporting_doc": Official certificate or document required in India (or "None required" if self-declaration).
-4. "warnings": Any critical pitfalls (e.g. spelling match with 10th marksheet, income certificate validity, masking Aadhaar).
+4. "warnings": Any critical pitfalls.
 
 {lang_instruction}
 Return pure JSON with no markdown wrapping.
@@ -46,17 +128,15 @@ Return pure JSON with no markdown wrapping.
                     contents=prompt
                 )
                 txt = response.text.strip()
-                # Remove markdown fences if returned
                 if txt.startswith("```"):
                     txt = txt.split("```")[1]
                     if txt.startswith("json"):
                         txt = txt[4:]
                 return json.loads(txt.strip())
             except Exception as e:
-                # Log and fallback gracefully to deterministic engine
                 print(f"[AIOrchestrator] Gemini API call exception: {e}. Falling back to internal engine.")
 
-        # High-Fidelity Heuristic / Internal Multilingual Knowledge Engine
+        # 3. High-Fidelity Heuristic / Internal Multilingual Knowledge Engine (Deterministic Fallback)
         return AIOrchestrator._internal_field_explanation(normalized_name, field_label, language)
 
     @staticmethod
@@ -195,7 +275,6 @@ Return pure JSON with no markdown wrapping.
 
         entry = selected_db.get(norm_name, None)
         if not entry and language != "en":
-            # fallback to english if specific key translation not in db
             entry = en_db.get(norm_name, None)
 
         if entry:
@@ -223,12 +302,50 @@ Return pure JSON with no markdown wrapping.
     @staticmethod
     def chat_with_form_assistant(message: str, field_context: Optional[Dict[str, Any]], language: str = "en") -> Dict[str, Any]:
         """
-        Conversational assistant answering specific questions about the form, fields, and requirements.
+        Conversational assistant answering citizen questions about forms, fields, and certificates.
+        Uses Groq if configured, Gemini if configured, or deterministic fallback.
         """
         msg_lower = message.lower()
+        provider = settings.effective_llm_provider
 
-        # Check if external Gemini is available
-        if AIOrchestrator.is_external_ai_configured() and settings.LLM_PROVIDER.lower() == "gemini":
+        # 1. Groq LLM Assistant
+        if AIOrchestrator.is_external_ai_configured() and provider == "groq":
+            try:
+                lang_prompt = "English"
+                if language == "te":
+                    lang_prompt = "Telugu (తెలుగు)"
+                elif language == "hi":
+                    lang_prompt = "Hindi (हिन्दी)"
+
+                system_prompt = f"""You are the FormWise AI Indian Citizen Application Assistant.
+Your goal is to guide the citizen kindly, clearly, and concisely in 2-3 sentences.
+Target Language: {lang_prompt}
+Field Context: {json.dumps(field_context or {})}
+
+Rules:
+1. Always be practical, respectful, and simple.
+2. If asking about a certificate (caste, income, residence), explain that it is obtained from MeeSeva, Tahsildar/MRO office, or DigiLocker in India.
+3. If asking about income, clarify family gross income criteria.
+4. If asking about banking, clarify that Aadhaar must be linked for Direct Benefit Transfer (DBT).
+5. Provide your response directly in {lang_prompt}."""
+
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": message}
+                ]
+
+                reply_text = AIOrchestrator._call_groq(messages, max_tokens=500)
+                if reply_text:
+                    return {
+                        "reply": reply_text.strip(),
+                        "suggested_action": "review_field",
+                        "language": language
+                    }
+            except Exception as e:
+                print(f"[AIOrchestrator] Groq chat error: {e}. Falling back to internal engine.")
+
+        # 2. Gemini Assistant
+        elif AIOrchestrator.is_external_ai_configured() and provider == "gemini":
             try:
                 from google import genai
                 client = genai.Client(api_key=settings.LLM_API_KEY)
@@ -248,9 +365,7 @@ Language: {lang_prompt}
 Rules:
 1. Always be polite, practical, and clear.
 2. If asking about a document, explain where they can get it (e.g. MeeSeva, Tahsildar, DigiLocker, College).
-3. If asking about income, explain that gross family income is needed.
-4. If asking about banking, explain that DBT requires Aadhaar-NPCI mapping.
-5. Provide response in {lang_prompt}.
+3. Provide response in {lang_prompt}.
 """
                 response = client.models.generate_content(
                     model=settings.LLM_MODEL,
@@ -262,9 +377,9 @@ Rules:
                     "language": language
                 }
             except Exception as e:
-                print(f"[AIOrchestrator] Chat fallback triggered: {e}")
+                print(f"[AIOrchestrator] Gemini Chat fallback triggered: {e}")
 
-        # Deterministic multilingual assistant responses
+        # 3. Deterministic multilingual assistant responses (Fallback)
         if "document" in msg_lower or "certificate" in msg_lower or "సర్టిఫికేట్" in msg_lower or "దస్తావేజు" in msg_lower:
             if language == "te":
                 reply = "ఈ దరఖాస్తుకు సాధారణంగా 10వ తరగతి మార్కుల జాబితా, కుల ధృవీకరణ పత్రం, తాజా ఆదాయ సర్టిఫికేట్ మరియు బ్యాంక్ పాస్‌బుక్ కాపీ అవసరం. మీరు వీటిని మీ 'డాక్యుమెంట్ వాల్ట్' (Document Vault) లో అప్‌లోడ్ చేసి భద్రపరచుకోవచ్చు."
@@ -279,22 +394,16 @@ Rules:
             action = "autofill_income"
         elif "bank" in msg_lower or "ifsc" in msg_lower or "బ్యాంక్" in msg_lower:
             if language == "te":
-                reply = "స్కాలర్‌షిప్ లేదా ప్రభుత్వ ప్రయోజనాలు నేరుగా మీ ఖాతాలో పడటానికి (DBT) మీ స్వంత సేవింగ్స్ బ్యాంక్ ఖాతా నంబర్ మరియు IFSC కోడ్ ఇవ్వాలి. ఖాతా తప్పనిసరిగా ఆధార్‌తో లింక్ అయి ఉండాలి."
+                reply = "మీ బ్యాంక్ పాస్‌బుక్ మొదటి పేజీలో ఉన్న ఖాతా సంఖ్య మరియు 11 అంకెల IFSC కోడ్‌ను నమోదు చేయండి. ఖాతా మీ ఆధార్‌తో NPCI ద్వారా లింక్ చేయబడి ఉండాలి."
             else:
-                reply = "For Direct Benefit Transfer (DBT) of scholarships or grants, provide your active individual savings bank account number and the 11-digit IFSC code from your bank passbook. Ensure the bank account is linked with your Aadhaar (NPCI mapped) and is not a joint or dormant account."
-            action = "check_bank"
-        elif "aadhaar" in msg_lower or "ఆధార్" in msg_lower:
-            if language == "te":
-                reply = "మీ 12 అంకెల ఆధార్ నంబర్‌ను ఇక్కడ సురక్షితంగా ఉపయోగించవచ్చు. FormWise AI మీ భద్రత కొరకు ఆధార్‌ను చివరి 4 అంకెలు మాత్రమే కనబడేలా (XXXX-XXXX-1234) మాస్క్ చేస్తుంది."
-            else:
-                reply = "You can enter your 12-digit Aadhaar number for identity matching. For privacy and compliance with Indian regulations, FormWise AI automatically masks your Aadhaar (displaying only XXXX-XXXX-1234) and never exposes raw numbers in logs."
-            action = "mask_aadhaar"
+                reply = "Enter the account number and 11-digit IFSC code from the front page of your bank passbook. Ensure the account is an active savings account in your name seeded with Aadhaar for Direct Benefit Transfer (DBT)."
+            action = "verify_bank"
         else:
             if language == "te":
-                reply = "మీ దరఖాస్తును సులభంగా పూర్తి చేయడానికి నేను సహాయం చేయగలను. మీకు ఏదైనా కాలమ్ అర్ధం కాకపోతే, లేదా ఏ సర్టిఫికేట్ కావాలో తెలుసుకోవాలనుకుంటే నిర్భయంగా నన్ను అడగండి."
+                reply = "మీ దరఖాస్తును సరిగ్గా పూరించడానికి సహాయం చేయడానికి నేను ఇక్కడ ఉన్నాను. మీరు ఏదైనా ఫీల్డ్ లేదా అవసరమైన సర్టిఫికేట్ గురించి నన్ను అడగవచ్చు."
             else:
-                reply = "I am here to guide you through completing this application. If you are uncertain about what any field means, what document is needed, or how to format your details, please ask, or select 'Smart Autofill' to automatically map your verified documents!"
-            action = "explore"
+                reply = "I am here to help you complete your application accurately. You can select any field to see what documents are required or ask me questions about income limits, certificates, or formatting."
+            action = "explore_fields"
 
         return {
             "reply": reply,

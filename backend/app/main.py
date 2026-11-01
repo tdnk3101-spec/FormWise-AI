@@ -53,7 +53,8 @@ def health_check():
         "status": "healthy",
         "database": "connected",
         "storage": "ready",
-        "llm_provider": settings.LLM_PROVIDER,
+        "llm_provider": settings.effective_llm_provider,
+        "llm_model": settings.effective_llm_model,
         "llm_configured": bool(settings.LLM_API_KEY)
     }
 
